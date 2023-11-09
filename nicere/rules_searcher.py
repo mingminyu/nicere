@@ -59,15 +59,16 @@ class SceneRule(BaseModel):
     scene_rules: List[GroupRegexRule]
     enable: bool = True
     role: Literal['user', 'agent', 'all'] = "agent"
-    global_formula: Optional[str] = None
-    global_rules: Optional[List[GroupRegexRule]] = None
+    global_formula: str = ""
+    global_rules: List[GroupRegexRule] = []
     description: str = ""
 
 
 class SceneMatchResult(BaseModel):
     scene_id: Optional[str] = None
-    match_result: bool = False
+    is_matched: bool = False
     rule_match_details: Optional[Dict[str, bool]] = None
+    global_mode: bool = False
 
 
 class RulesSearcher:
@@ -126,39 +127,60 @@ class RulesSearcher:
             role: str = "agent",
             *,
             exclude_scene_ids: List[str] = None,
-            show_rule_match_detail: bool = False
+            show_rule_match_detail: bool = False,
+            global_match: bool = False
     ) -> List[SceneMatchResult]:
         """是否单句匹配
         :param text: 传入的文本
         :param role: 应用的角色
         :param exclude_scene_ids:  不需要匹配匹配的 scene id
         :param show_rule_match_detail: 显示每个 rule_id 命中具体信息
+        :param global_match: 是否全局匹配
         """
         if exclude_scene_ids is None:
             exclude_scene_ids = []
 
         scenes_matched: List[SceneMatchResult] = []
+        filter_rules = [
+            rule for rule in self.rules
+            if rule.enable is True and role == rule.role and rule.scene_id not in exclude_scene_ids
+        ]
 
-        for rule in self.rules:
-            if rule.enable is True and role == rule.role:
-                scene_match_result: SceneMatchResult = SceneMatchResult()
+        for rule in filter_rules:
+            scene_match_result: SceneMatchResult = SceneMatchResult()
 
+            if global_match is True:
+                if rule.global_formula != "":
+                    scene_rules_match_result = {
+                        global_rule.rule_id: await self.group_regex_match(global_rule, text)
+                        for global_rule in rule.global_rules
+                    }
+                    scene_is_matched = eval(rule.global_formula.format(**scene_rules_match_result))
+                else:
+                    scene_rules_match_result = {}
+                    scene_is_matched = False
+
+                scene_match_result.global_mode = True
+            else:
                 scene_rules_match_result = {
                     scene_rule.rule_id: await self.group_regex_match(scene_rule, text)
                     for scene_rule in rule.scene_rules
                 }
+                scene_is_matched = eval(rule.formula.format(**scene_rules_match_result))
 
-                scene_is_matched: bool = eval(rule.formula.format(**scene_rules_match_result))
-                scene_match_result.scene_id = rule.scene_id
-                scene_match_result.match_result = scene_is_matched
+            scene_match_result.is_matched = scene_is_matched
+            scene_match_result.scene_id = rule.scene_id
 
-                if show_rule_match_detail:
-                    scene_match_result.rule_match_details = scene_rules_match_result
+            if show_rule_match_detail:
+                scene_match_result.rule_match_details = scene_rules_match_result
 
-                scenes_matched.append(scene_match_result)
+            scenes_matched.append(scene_match_result)
+
         return scenes_matched
 
-    def is_context_match(self):
+    def is_context_match(
+            self,
+    ):
         """是否上下文对话满足正则匹配"""
         ...
 
@@ -249,5 +271,5 @@ class RulesSearcher:
 if __name__ == "__main__":
     rules_searcher = RulesSearcher("./examples/test_rules.yml")
     # rules_searcher.validate_scene_rules()
-    asyncio.run(rules_searcher.is_sentence_match(show_rule_match_detail=True))
+    asyncio.run(rules_searcher.is_sentence_match(text="额度可以用", show_rule_match_detail=True, global_match=False))
 
