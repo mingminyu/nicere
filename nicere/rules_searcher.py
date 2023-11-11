@@ -6,10 +6,10 @@ import yaml
 import asyncio
 import logging
 from rich.logging import RichHandler
-from typing import List, Dict, Literal, Optional, Union, Callable
-from pydantic import BaseModel
-from rich.pretty import pprint
+from typing import List, Dict, Literal, Optional, Union, Callable, Any
+from pydantic import BaseModel, computed_field
 from functools import wraps
+from rich.pretty import pprint
 
 """
 基于 Python re 库的扩展库，增强正则识别能力
@@ -55,6 +55,7 @@ class GroupRegexRule(BaseModel):
 class SceneRule(BaseModel):
     intent: str
     scene_id: str
+    risk_level: str
     formula: str
     scene_rules: List[GroupRegexRule]
     enable: bool = True
@@ -62,6 +63,30 @@ class SceneRule(BaseModel):
     global_formula: str = ""
     global_rules: List[GroupRegexRule] = []
     description: str = ""
+
+    @computed_field
+    def risk_level_id(self) -> int:
+        """风险等级对应的 ID"""
+        if self.risk_level == "高":
+            return 1
+        elif self.risk_level == "中":
+            return 2
+        else:
+            return 3
+
+    @computed_field
+    def instruction(self) -> str:
+        """LLM Instruction Prompt"""
+        return f"请判断给出的文本内容是否命中{self.description}，输出为 1 或 0，以下是具体内容-->"
+
+    @computed_field
+    def highlight_text_pattern(self) -> re.Pattern:
+        """高亮文本 Pattern"""
+        highlight_pattern = "|".join(
+            [regex.reg.pattern for scene_rule in self.scene_rules if scene_rule.positive
+             for regex in scene_rule.regexes]
+        )
+        return re.compile(highlight_pattern)
 
 
 class SceneMatchResult(BaseModel):
@@ -94,6 +119,15 @@ class RulesSearcher:
             raise ValueError("The content of `rules_yaml_filepath` must include `scenes` key.")
 
         self.rules = [SceneRule(**rule) for rule in rules_content["scenes"]]
+
+    def get_scene_role(self, scene_id: str) -> Union[SceneRule, None]:
+        """根据 scene_id 获取对应的 scene_rule"""
+        for scene_rule in self.rules:
+            if scene_rule.scene_id == scene_id:
+                return scene_rule
+
+        self.log.warning(f"scene_id `{scene_id}` is not exists.")
+        return None
 
     @staticmethod
     async def regex_match(regex: RegexRule, text: str):
@@ -155,7 +189,8 @@ class RulesSearcher:
                         global_rule.rule_id: await self.group_regex_match(global_rule, text)
                         for global_rule in rule.global_rules
                     }
-                    scene_is_matched = eval(rule.global_formula.format(**scene_rules_match_result))
+                    scene_is_matched = eval(
+                        rule.global_formula.replace("!", "not ").format(**scene_rules_match_result))
                 else:
                     scene_rules_match_result = {}
                     scene_is_matched = False
@@ -166,7 +201,8 @@ class RulesSearcher:
                     scene_rule.rule_id: await self.group_regex_match(scene_rule, text)
                     for scene_rule in rule.scene_rules
                 }
-                scene_is_matched = eval(rule.formula.format(**scene_rules_match_result))
+                scene_is_matched = eval(
+                    rule.formula.replace("!", "not ").format(**scene_rules_match_result))
 
             scene_match_result.is_matched = scene_is_matched
             scene_match_result.scene_id = rule.scene_id
@@ -178,10 +214,24 @@ class RulesSearcher:
 
         return scenes_matched
 
+    @staticmethod
+    def highlight_text(scene_rule: SceneRule, text: str) -> List[Dict[str, Union[str, int]]]:
+        """高亮场景关键词"""
+        if isinstance(scene_rule.highlight_text_pattern, re.Pattern):
+            highlight_text_pattern: re.Pattern = scene_rule.highlight_text_pattern
+            highlight_entities = [
+                {"start": highlight_text.start(), "end": highlight_text.end(), "value": highlight_text.span()}
+                for highlight_text in highlight_text_pattern.finditer(text)
+            ]
+            return highlight_entities
+        return []
+
     def is_context_match(
             self,
     ):
-        """是否上下文对话满足正则匹配"""
+        """是否上下文对话满足正则匹配
+        :TODO:
+        """
         ...
 
     def validate_singe_regex(self, regex: RegexRule) -> bool:
@@ -266,10 +316,3 @@ class RulesSearcher:
         for scene_rule in self.rules:
             if scene_rule.scene_id in scene_ids:
                 self.validate_scene_rule(scene_rule)
-
-
-if __name__ == "__main__":
-    rules_searcher = RulesSearcher("./examples/test_rules.yml")
-    # rules_searcher.validate_scene_rules()
-    asyncio.run(rules_searcher.is_sentence_match(text="额度可以用", show_rule_match_detail=True, global_match=False))
-

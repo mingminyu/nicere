@@ -14,7 +14,5 @@ setup(
         "rich",
         "pydantic",
         "pyyaml"
-        "types-pyyaml",
-        "pyyamltypes-pyyaml",
     ],
 )
